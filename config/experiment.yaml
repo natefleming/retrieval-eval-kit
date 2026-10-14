@@ -52,6 +52,13 @@ variants:
       factory: retrieval_eval.factories:ai_search
       params: {query_type: HYBRID}
 
+  - name: existing_full_text
+    description: Current index, keyword search only (BM25, no embeddings)
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: FULL_TEXT}
+
   - name: existing_hybrid_rerank
     description: Current index, vector + keyword, Databricks reranker
     index: {existing: "${source_index}"}
