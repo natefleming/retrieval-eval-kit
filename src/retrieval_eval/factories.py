@@ -10,13 +10,16 @@ relative to the experiment file). It is called as `factory(settings, variant, **
 Included: `ai_search` (AI Search client), `databricks_vector_search` and `retriever_tool` (the LangChain components
 existing apps use), `endpoint_reranker` / `endpoint_reranker_tool` (AI Search candidates re-scored by a custom
 reranker on Model Serving, as a retriever or as an agent tool), and `dynamic_filter` (an LLM writes metadata filters
-per request, as an agent using `VectorSearchRetrieverTool(dynamic_filter=True)` would). Reranking always lives inside the retriever, so callers, and the
+per request, as an agent using `VectorSearchRetrieverTool(dynamic_filter=True)` would), and `fusion_search` (guarded
+dynamic filters with FULL_TEXT and HYBRID searches run concurrently, fused, then reranked). Reranking always lives inside the retriever, so callers, and the
 evaluator, see one `query → documents` step.
 To evaluate your own retriever, copy one of these into a file in the repo, change it, and point a variant at it.
 """
 
 from __future__ import annotations
 
+import contextvars
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Literal
 
 import mlflow
@@ -352,6 +355,35 @@ def _column_vocabulary(table: str, columns: list[str], max_values: int = 20000) 
     return vocabulary
 
 
+def _planner_and_store(
+    settings: Settings, variant: Variant, *, llm_endpoint: str, llm_temperature: float | None, query_type: QueryType,
+    num_results: int | None, columns: list[str] | None,
+) -> tuple[Any, DatabricksVectorSearch]:
+    """An LLM bound to the real dynamic-filter tool, and the store the tool wraps (whose results keep their metadata)."""
+    index_name: str = variant.index_name(settings) or settings.source_index
+    cols: list[str] = columns or [settings.doc_uri_column, *settings.content_columns]
+    tool: VectorSearchRetrieverTool = VectorSearchRetrieverTool(
+        index_name=index_name, columns=cols, num_results=num_results or settings.k, query_type=query_type,
+        dynamic_filter=True, tool_name="search", tool_description="Search the catalog for items matching the request.",
+    )
+    llm: BaseChatModel = (
+        ChatDatabricks(endpoint=llm_endpoint)
+        if llm_temperature is None
+        else ChatDatabricks(endpoint=llm_endpoint, temperature=llm_temperature)
+    )
+    return llm.bind_tools([tool]), DatabricksVectorSearch(index_name=index_name, columns=cols)
+
+
+def _guard_vocabulary(settings: Settings, guarded: bool, guard_columns: list[str] | None, factory: str) -> Vocabulary | None:
+    from retrieval_eval.sources import source_table
+
+    if not guarded:
+        return None
+    if not guard_columns:
+        raise ValueError(f"{factory}: guarded=true needs guard_columns, e.g. [brand_name, merchandise_class]")
+    return _column_vocabulary(source_table(settings), guard_columns)
+
+
 def dynamic_filter(
     settings: Settings,
     variant: Variant,
@@ -382,28 +414,108 @@ def dynamic_filter(
             e.g. [brand_name, merchandise_class]. Filters on other columns pass through unchanged.
         rerank_endpoint: Optional custom reranker endpoint (see `endpoint_reranker`) applied to `candidates` results.
     """
-    from retrieval_eval.sources import source_table
-
-    index_name: str = variant.index_name(settings) or settings.source_index
-    cols: list[str] = columns or [settings.doc_uri_column, *settings.content_columns]
-    tool: VectorSearchRetrieverTool = VectorSearchRetrieverTool(
-        index_name=index_name, columns=cols, num_results=num_results or settings.k, query_type=query_type,
-        dynamic_filter=True, tool_name="search", tool_description="Search the catalog for items matching the request.",
+    planner, store = _planner_and_store(
+        settings, variant, llm_endpoint=llm_endpoint, llm_temperature=llm_temperature, query_type=query_type,
+        num_results=num_results, columns=columns,
     )
-    llm: BaseChatModel = (
-        ChatDatabricks(endpoint=llm_endpoint)
-        if llm_temperature is None
-        else ChatDatabricks(endpoint=llm_endpoint, temperature=llm_temperature)
-    )
-    vocabulary: Vocabulary | None = None
-    if guarded:
-        if not guard_columns:
-            raise ValueError("dynamic_filter: guarded=true needs guard_columns, e.g. [brand_name, merchandise_class]")
-        vocabulary = _column_vocabulary(source_table(settings), guard_columns)
     retriever: BaseRetriever = DynamicFilterRetriever(
-        planner=llm.bind_tools([tool]),
-        store=DatabricksVectorSearch(index_name=index_name, columns=cols),
-        k=candidates if rerank_endpoint else (num_results or settings.k), query_type=query_type, vocabulary=vocabulary,
+        planner=planner, store=store, k=candidates if rerank_endpoint else (num_results or settings.k),
+        query_type=query_type, vocabulary=_guard_vocabulary(settings, guarded, guard_columns, "dynamic_filter"),
+    )
+    if rerank_endpoint:
+        return EndpointRerankRetriever(base=retriever, endpoint_name=rerank_endpoint, top_n=num_results or settings.k)
+    return retriever
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# fusion_search: guarded dynamic filters, FULL_TEXT and HYBRID searches in parallel, fused, then reranked
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def reciprocal_rank_fusion(result_lists: list[list[Document]], id_key: str, k: int, constant: int = 60) -> list[Document]:
+    """Merge ranked lists: each document scores the sum of 1 / (constant + rank) over the lists it appears in.
+
+    Documents are identified by `metadata[id_key]` plus their text (so chunks of one document stay distinct). The fused
+    score is kept in `metadata.fusion_score`; the best `k` documents are returned.
+    """
+    scores: dict[tuple[str, str], float] = {}
+    documents: dict[tuple[str, str], Document] = {}
+    for results in result_lists:
+        for rank, document in enumerate(results, start=1):
+            key: tuple[str, str] = (str(document.metadata.get(id_key)), document.page_content)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (constant + rank)
+            documents.setdefault(key, document)
+    ranked: list[tuple[str, str]] = sorted(scores, key=lambda key: scores[key], reverse=True)[:k]
+    return [Document(page_content=documents[key].page_content, metadata={**documents[key].metadata,
+                                                                         "fusion_score": scores[key]}) for key in ranked]
+
+
+class FusionSearchRetriever(DynamicFilterRetriever):
+    """`DynamicFilterRetriever` that runs one search per query type concurrently with the same planned filters and
+    fuses the result lists with reciprocal rank fusion (guarded fallback and planning are inherited).
+
+    Keyword (FULL_TEXT) search finds exact terms such as brands and model numbers; HYBRID adds vector similarity for
+    paraphrased needs. Each search is traced as its own span under the retriever.
+    """
+
+    query_types: list[QueryType] = ["FULL_TEXT", "HYBRID"]
+    id_key: str = "doc_uri"
+
+    def _search_one(self, query_type: QueryType, query: str, filters: dict[str, Any]) -> list[Document]:
+        with mlflow.start_span(name=f"search_{query_type.lower()}", span_type=SpanType.CHAIN) as span:
+            span.set_inputs({"query": query, "filters": filters, "query_type": query_type})
+            documents: list[Document] = self.store.similarity_search(
+                query, k=self.k, filter=filters or None, query_type=query_type
+            )
+            span.set_outputs({"results": len(documents)})
+            return documents
+
+    def _search(self, query: str, filters: dict[str, Any]) -> list[Document]:
+        with ThreadPoolExecutor(max_workers=len(self.query_types)) as pool:
+            # Each thread runs in a copy of this context, so its span nests under the current trace.
+            futures: list[Future[list[Document]]] = [
+                pool.submit(contextvars.copy_context().run, self._search_one, query_type, query, filters)
+                for query_type in self.query_types
+            ]
+            result_lists: list[list[Document]] = [future.result() for future in futures]
+        return reciprocal_rank_fusion(result_lists, self.id_key, self.k)
+
+
+def fusion_search(
+    settings: Settings,
+    variant: Variant,
+    *,
+    guard_columns: list[str],
+    rerank_endpoint: str | None,
+    query_types: list[QueryType] | None = None,
+    llm_endpoint: str = "databricks-claude-sonnet-5-5",
+    llm_temperature: float | None = None,
+    num_results: int | None = None,
+    columns: list[str] | None = None,
+    candidates: int = 50,
+) -> BaseRetriever:
+    """Guarded dynamic filters + concurrent FULL_TEXT and HYBRID searches + reciprocal rank fusion + reranking.
+
+    1. `llm_endpoint` plans `query` + `filters` once (as in `dynamic_filter`), and the filters are guarded.
+    2. One search per query type runs in parallel with those filters, each returning `candidates` results.
+    3. The lists are fused into one pool of `candidates` documents; an empty filtered pool falls back to unfiltered.
+    4. `rerank_endpoint` re-scores the pool and the best `num_results` (default `settings.k`) are returned. Set it to
+       null to return the fused order instead.
+
+    Args:
+        guard_columns: Categorical columns whose filter values are checked, e.g. [brand_name, merchandise_class].
+        rerank_endpoint: Custom reranker endpoint (see `endpoint_reranker`), or null for no reranking.
+        query_types: Searches to run and fuse; default [FULL_TEXT, HYBRID].
+        columns: Columns returned and described to the LLM; default `doc_uri_column` + `content_columns`.
+    """
+    planner, store = _planner_and_store(
+        settings, variant, llm_endpoint=llm_endpoint, llm_temperature=llm_temperature, query_type="HYBRID",
+        num_results=num_results, columns=columns,
+    )
+    retriever: BaseRetriever = FusionSearchRetriever(
+        planner=planner, store=store, k=candidates if rerank_endpoint else (num_results or settings.k),
+        query_types=query_types or ["FULL_TEXT", "HYBRID"], id_key=variant.retriever.doc_uri_key,
+        vocabulary=_guard_vocabulary(settings, True, guard_columns, "fusion_search"),
     )
     if rerank_endpoint:
         return EndpointRerankRetriever(base=retriever, endpoint_name=rerank_endpoint, top_n=num_results or settings.k)

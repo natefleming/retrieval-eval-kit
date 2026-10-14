@@ -68,3 +68,17 @@ variants:
         rerank_endpoint: retrieval-gte-reranker-modernbert
         candidates: 50
       doc_uri_key: product_id
+
+  - name: fusion_full_text_hybrid_gte_rerank
+    description: Guarded dynamic filters, keyword + hybrid searches in parallel, fused, top 50 re-scored by gte-reranker-modernbert
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:fusion_search
+      params:
+        llm_endpoint: databricks-claude-sonnet-5-5
+        query_types: [FULL_TEXT, HYBRID]
+        columns: [product_id, product_name, brand_name, merchandise_class, description]
+        guard_columns: [brand_name, merchandise_class]
+        rerank_endpoint: retrieval-gte-reranker-modernbert
+        candidates: 50
+      doc_uri_key: product_id

@@ -5,7 +5,15 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
 from retrieval_eval.config import ExperimentConfig
-from retrieval_eval.factories import DynamicFilterRetriever, filters_to_dict, guard_filters
+import mlflow
+
+from retrieval_eval.factories import (
+    DynamicFilterRetriever,
+    FusionSearchRetriever,
+    filters_to_dict,
+    guard_filters,
+    reciprocal_rank_fusion,
+)
 
 VOCAB: dict[str, dict[str, list[str]]] = {
     "brand_name": {"dewalt": ["DEWALT"], "milwaukee": ["Milwaukee"], "big green egg": ["BIG GREEN EGG", "Big Green Egg"]},
@@ -101,3 +109,68 @@ def test_no_tool_call_falls_back_to_the_plain_request() -> None:
     assert r.plan("cordless drill") == {"query": "cordless drill", "filters": {}, "used_tool": False}
     r.invoke("cordless drill")
     assert store.calls == [("cordless drill", None)]
+
+
+def doc(product_id: int) -> Document:
+    return Document(page_content=f"p{product_id}", metadata={"product_id": product_id})
+
+
+def test_reciprocal_rank_fusion_rewards_documents_found_by_both_searches() -> None:
+    fused = reciprocal_rank_fusion([[doc(1), doc(2), doc(3)], [doc(3), doc(4)]], "product_id", k=3)
+    assert [d.metadata["product_id"] for d in fused] == [3, 1, 2]  # 3 is in both lists; 1 leads one; 2 ties 4, seen first
+    assert fused[0].metadata["fusion_score"] == 1 / 63 + 1 / 61
+
+
+class TypedStore(FakeStore):
+    """Returns different results per query type, and records which types were searched."""
+
+    RESULTS: dict[str, list[int]] = {"FULL_TEXT": [1, 2], "HYBRID": [2, 3]}
+
+    def __init__(self, empty_when_filtered: bool = False) -> None:
+        super().__init__(empty_when_filtered)
+        self.query_types: list[str] = []
+
+    def similarity_search(self, query: str, k: int, filter: dict[str, Any] | None, query_type: str) -> list[Document]:
+        self.calls.append((query, filter))
+        self.query_types.append(query_type)
+        if filter and self.empty_when_filtered:
+            return []
+        return [doc(i) for i in self.RESULTS[query_type]]
+
+
+def fusion(store: TypedStore, args: dict[str, Any]) -> FusionSearchRetriever:
+    return FusionSearchRetriever.model_construct(
+        planner=FakePlanner(args), store=store, k=10, query_type="HYBRID", vocabulary=VOCAB,
+        query_types=["FULL_TEXT", "HYBRID"], id_key="product_id",
+    )
+
+
+def test_fusion_runs_each_query_type_with_the_guarded_filters_and_fuses() -> None:
+    store = TypedStore()
+    docs = fusion(store, {"query": "impact driver", "filters": [{"key": "brand_name NOT", "value": "dewalt"}]}).invoke(
+        "impact driver, not DeWalt")
+    assert sorted(store.query_types) == ["FULL_TEXT", "HYBRID"]
+    assert store.calls == [("impact driver", {"brand_name NOT": "DEWALT"})] * 2
+    assert [d.metadata["product_id"] for d in docs] == [2, 1, 3]
+
+
+def test_fusion_falls_back_to_unfiltered_when_every_filtered_search_is_empty() -> None:
+    store = TypedStore(empty_when_filtered=True)
+    docs = fusion(store, {"query": "fertilizer", "filters": [{"key": "merchandise_class", "value": "plant food"}]}).invoke(
+        "fertilizer from plant food")
+    assert [f for _, f in store.calls] == [{"merchandise_class": "PLANT FOOD"}] * 2 + [None] * 2
+    assert len(docs) == 3
+
+
+def test_fusion_searches_are_spans_in_the_callers_trace() -> None:
+    @mlflow.trace(name="retrieve")
+    def run() -> None:
+        fusion(TypedStore(), {"query": "drill"}).invoke("drill")
+
+    run()
+    mlflow.flush_trace_async_logging()
+    trace = mlflow.get_trace(mlflow.get_last_active_trace_id())
+    assert trace is not None
+    names = {span.name for span in trace.data.spans}
+    assert {"retrieve", "plan_filters", "search_full_text", "search_hybrid"} <= names
+    assert len(mlflow.search_traces(return_type="list")) == 1  # the threads' spans did not start traces of their own

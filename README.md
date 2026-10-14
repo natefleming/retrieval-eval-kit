@@ -174,6 +174,7 @@ Each factory param is logged on the MLflow run as `retriever.<name>`, so you can
 | `endpoint_reranker` | AI Search candidates re-scored by a custom reranker on Model Serving | Testing open-source rerankers (Qwen3-Reranker, gte-reranker-modernbert, bge-reranker, ...) |
 | `endpoint_reranker_tool` | `endpoint_reranker` wrapped as a retriever tool | The same, in the form an agent calls (reranking happens inside the tool) |
 | `dynamic_filter` | An LLM writes `query` + metadata `filters` per request, then searches | Agents using `VectorSearchRetrieverTool(dynamic_filter=True)` |
+| `fusion_search` | Guarded dynamic filters, FULL_TEXT and HYBRID searches in parallel, fused, then reranked | Catalogs where exact terms (brands, model numbers) and paraphrased needs both matter |
 
 Reranking always lives *inside* the retriever, so the agent, and the evaluator, see one `query → documents` step.
 `as_retriever_tool(retriever, name, description)` wraps any retriever, including your own, as an agent tool the same way.
@@ -235,8 +236,14 @@ Calling the tool with only a query would never filter, so the `dynamic_filter` f
    are exact-match, so unguarded filters with a wrong case or a guessed category silently return nothing.
 4. `rerank_endpoint` optionally re-scores the results with a custom reranker (as in `endpoint_reranker`).
 
-**Comparing.** `config/filters.yaml` compares no filters, dynamic filters, guarded dynamic filters, and guarded +
-gte-modernbert reranking. It uses its **own dataset** (`retrieval_eval_dataset_constraints`), with questions that
+**Fusion (`fusion_search`).** Plans and guards filters the same way, then runs a FULL_TEXT (keyword) and a HYBRID
+search **at the same time** with those filters. The two result lists are merged with reciprocal rank fusion (a
+document scores 1 ÷ (60 + rank) in each list it appears in), and the merged pool of `candidates` is re-scored by
+`rerank_endpoint`. Keyword search catches exact brand names and model numbers; hybrid catches paraphrased needs. Each
+search is its own `search_full_text` / `search_hybrid` span in the trace. Set `rerank_endpoint: null` to skip reranking.
+
+**Comparing.** `config/filters.yaml` compares no filters, dynamic filters, guarded dynamic filters, guarded +
+gte-modernbert reranking, and fusion + gte-modernbert reranking. It uses its **own dataset** (`retrieval_eval_dataset_constraints`), with questions that
 state a brand, a category or an exclusion, because questions with nothing to filter on can't show whether filtering
 helps. The first run creates it; later runs reuse it.
 
