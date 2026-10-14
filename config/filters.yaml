@@ -1,0 +1,70 @@
+# Dynamic filtering comparison: no filters vs. LLM-written metadata filters (as an agent using
+# VectorSearchRetrieverTool(dynamic_filter=True) would), with and without guarding, and combined with a reranker.
+#
+# Inherits every setting from experiment.yaml, but uses its OWN dataset of constraint-style questions ("..., not
+# DeWalt", "... in plant food"). Most questions in the main dataset have nothing to filter on, so they can't show
+# whether filtering helps. The first run creates the dataset; later runs reuse it (overwrite_dataset stays false).
+# Use it: set the `config_path` widget in notebooks 1 and 3 to ../config/filters.yaml, or
+#   databricks bundle run retrieval_eval --params config_path=../config/filters.yaml
+
+base: experiment.yaml
+
+settings:
+  dataset_table: retrieval_eval_dataset_constraints
+  # Include the category so generated questions can state category constraints (it is also returned with results).
+  content_columns: [product_name, brand_name, merchandise_class, description]
+  question_guidelines: |
+    - Write requests the way a shopper types them into a store search box or asks a store associate.
+    - Most requests must state a constraint that matches the product: its brand ("Milwaukee ...", "a Scotts ..."),
+      its category ("... from plant food", "... in kitchen storage"), or an exclusion ("..., not DeWalt").
+    - Exclusions must name a different brand than the product's own.
+    - The rest of the request describes the need in everyday words; do not copy the product name.
+  baseline_variant: hybrid
+  secondary_metric: recall_at_1
+
+variants:
+  - name: hybrid
+    description: Vector + keyword, no filters
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID}
+
+  - name: hybrid_dynamic_filter
+    description: An LLM writes filters per question (exact-match, as the tool does)
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:dynamic_filter
+      params:
+        llm_endpoint: databricks-claude-sonnet-5-5
+        query_type: HYBRID
+        columns: [product_id, product_name, brand_name, merchandise_class, description]
+      doc_uri_key: product_id
+
+  - name: hybrid_dynamic_filter_guarded
+    description: Same, with filter values checked against real column values and an unfiltered fallback
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:dynamic_filter
+      params:
+        llm_endpoint: databricks-claude-sonnet-5-5
+        query_type: HYBRID
+        columns: [product_id, product_name, brand_name, merchandise_class, description]
+        guarded: true
+        guard_columns: [brand_name, merchandise_class]
+      doc_uri_key: product_id
+
+  - name: hybrid_dynamic_filter_guarded_gte_rerank
+    description: Guarded dynamic filters, top 50 re-scored by gte-reranker-modernbert
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:dynamic_filter
+      params:
+        llm_endpoint: databricks-claude-sonnet-5-5
+        query_type: HYBRID
+        columns: [product_id, product_name, brand_name, merchandise_class, description]
+        guarded: true
+        guard_columns: [brand_name, merchandise_class]
+        rerank_endpoint: retrieval-gte-reranker-modernbert
+        candidates: 50
+      doc_uri_key: product_id

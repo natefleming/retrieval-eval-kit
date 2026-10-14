@@ -1,0 +1,20 @@
+# One-off: deploy custom rerankers (listed in config/reranker_models.yaml) on scale-to-zero serving endpoints.
+# Separate from retrieval_eval so the main pipeline never creates GPU endpoints unless you ask for it.
+resources:
+  jobs:
+    deploy_rerankers:
+      name: retrieval-eval-kit-deploy-rerankers
+      parameters:
+        - {name: config_path, default: "${var.config_path}"}
+        - {name: output_schema, default: "${var.output_schema}"}
+        - {name: models, default: "${var.reranker_models}"}
+      environments:
+        - environment_key: serverless_v5
+          spec:
+            environment_version: "5"
+      tasks:
+        - task_key: deploy_rerankers
+          environment_key: serverless_v5
+          timeout_seconds: 14400
+          notebook_task:
+            notebook_path: ../notebooks/04_deploy_rerankers.py

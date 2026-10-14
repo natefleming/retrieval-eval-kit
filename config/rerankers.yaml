@@ -1,0 +1,68 @@
+# Reranker comparison: plain hybrid search, the built-in Databricks reranker (with different input columns), and
+# custom rerankers on Model Serving.
+#
+# Inherits every setting (index, dataset, judges, recommendation) from experiment.yaml, so results are comparable with
+# the main experiment. Custom rerankers need their endpoints first: run notebooks/04_deploy_rerankers.py (or the
+# bundle job `deploy_rerankers`) with models: qwen3_0_6b qwen3_4b gte_modernbert. Remove variants for endpoints you
+# haven't deployed.
+# Use it: set the `config_path` widget in notebook 3 to ../config/rerankers.yaml, or
+#   databricks bundle run retrieval_eval --params config_path=../config/rerankers.yaml
+
+base: experiment.yaml
+
+settings:
+  baseline_variant: hybrid      # compare every reranker with plain hybrid search
+  secondary_metric: recall_at_1 # rerankers are about putting the right result first
+
+variants:
+  - name: hybrid
+    description: Vector + keyword, no reranker
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID}
+
+  # Built-in Databricks reranker. It reads columns in order and only the first ~2,000 characters, so which columns
+  # (and their order) you give it matters.
+  - name: builtin_rerank_name
+    description: Built-in reranker on product name only
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID, rerank_columns: [product_name]}
+
+  - name: builtin_rerank_name_desc
+    description: Built-in reranker on name + description
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID, rerank_columns: [product_name, description]}
+
+  - name: builtin_rerank_name_brand_desc
+    description: Built-in reranker on name + brand + description
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID, rerank_columns: [product_name, brand_name, description]}
+
+  # Custom rerankers (endpoint_reranker): hybrid search returns 50 candidates, the endpoint re-scores them.
+  - name: qwen3_0_6b_rerank
+    description: Qwen3-Reranker-0.6B on the top 50
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:endpoint_reranker
+      params: {endpoint_name: retrieval-qwen3-reranker-0-6b, candidates: 50, query_type: HYBRID}
+
+  - name: qwen3_4b_rerank
+    description: Qwen3-Reranker-4B on the top 50
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:endpoint_reranker
+      params: {endpoint_name: retrieval-qwen3-reranker-4b, candidates: 50, query_type: HYBRID}
+
+  - name: gte_modernbert_rerank
+    description: gte-reranker-modernbert-base on the top 50
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:endpoint_reranker
+      params: {endpoint_name: retrieval-gte-reranker-modernbert, candidates: 50, query_type: HYBRID}

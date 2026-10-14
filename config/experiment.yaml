@@ -1,0 +1,113 @@
+# Retrieval experiment definition.
+#
+# `settings` are shared by every step. Any of them can be overridden by a job parameter or notebook widget.
+# `variants` are the retrieval configurations to compare. Each one becomes an MLflow run:
+#   - `retriever.factory` builds the LangChain retriever or tool under test: 'package.module:function', or
+#     'path/to/file.py:function' (relative to this file) for your own. It is called as
+#     factory(settings, variant, **retriever.params). Example factories are in src/retrieval_eval/factories.py.
+#   - `retriever.doc_uri_key` is the result-metadata key holding the id that matches the dataset's doc_uri.
+#   - `index` (optional) is the AI Search index the variant queries: `existing`, or a recipe (`text` +
+#     `embedding_model`) that step 2 builds. Variants with the same recipe share one built index.
+# `${name}` refers to a setting.
+
+settings:
+  source_index: retail_consumer_goods.hardware_store.products_index
+  doc_uri_column: product_id
+  content_columns: [product_name, brand_name, description]
+  output_schema: retail_consumer_goods.retrieval_eval
+  dataset_table: retrieval_eval_dataset
+  num_docs: 200
+  num_evals: 100
+  agent_description: >-
+    A product search assistant for a hardware store. Shoppers describe what they need and the assistant finds
+    matching products from the catalog.
+  overwrite_dataset: false   # keep false: an existing dataset is reused so every run scores the same questions.
+                             # Set true only to delete it and generate new questions.
+  question_guidelines: |
+    - Write requests the way a shopper types them into a store search box or asks a store associate.
+    - Mix short keyword searches ("cordless drill 20v") with full-sentence needs ("something to cut copper pipe").
+    - Questions must be answerable by the product they were generated from; avoid generic questions.
+  k: 10
+  judge_model: databricks:/databricks-claude-sonnet-5-5
+  use_llm_judges: true
+  # Recommendation (analysis section of notebook 3)
+  primary_metric: recall_at_10      # what "best" means: recall_at_10 for RAG/agents, recall_at_1 or ndcg_at_5 for search
+  secondary_metric: ndcg_at_10      # tie-breaker between statistically tied variants
+  latency_budget_ms:                # e.g. 500 to exclude slower variants; empty = no budget
+  baseline_variant: existing_ann    # the configuration in use today
+
+variants:
+  # ai_search factory on the index that already exists (nothing is built).
+  - name: existing_ann
+    description: Current index, vector search only
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: ANN}
+
+  - name: existing_hybrid
+    description: Current index, vector + keyword
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID}
+
+  - name: existing_hybrid_rerank
+    description: Current index, vector + keyword, Databricks reranker
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID, rerank_columns: [product_name, description]}
+
+  # ai_search factory on new indexes: embed name + brand + description instead of description only.
+  - name: composite_gte_hybrid
+    description: Name + brand + description, gte-large-en
+    index:
+      text: {columns: [product_name, brand_name, description], separator: "\n"}
+      embedding_model: databricks-gte-large-en
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID}
+
+  - name: composite_bge_hybrid
+    description: Name + brand + description, bge-large-en
+    index:
+      text: {columns: [product_name, brand_name, description], separator: "\n"}
+      embedding_model: databricks-bge-large-en
+    retriever:
+      factory: retrieval_eval.factories:ai_search
+      params: {query_type: HYBRID}
+
+  # LangChain components existing apps already use, on the current index.
+  - name: langchain_vector_search_hybrid
+    description: databricks_langchain DatabricksVectorSearch retriever
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:databricks_vector_search
+      params: {query_type: HYBRID}
+      doc_uri_key: product_id
+
+  - name: langchain_retriever_tool_hybrid
+    description: The same retriever wrapped as a LangChain retriever tool
+    index: {existing: "${source_index}"}
+    retriever:
+      factory: retrieval_eval.factories:retriever_tool
+      params: {query_type: HYBRID}
+      doc_uri_key: product_id
+
+  # Rerankers (built-in vs. a custom Qwen3 reranker endpoint) are compared in rerankers.yaml.
+
+  # Your own retriever: put a factory in a file next to this one and reference it by path.
+  # - name: my_retriever
+  #   retriever:
+  #     factory: my_retrievers.py:make_retriever
+  #     doc_uri_key: product_id
+
+  # Chunking (for long documents; product rows are short):
+  # - name: chunk_512_gte
+  #   index:
+  #     text: {columns: [description], chunk_size: 512, chunk_overlap: 64}
+  #     embedding_model: databricks-gte-large-en
+  #   retriever:
+  #     factory: retrieval_eval.factories:ai_search
+  #     params: {query_type: HYBRID}

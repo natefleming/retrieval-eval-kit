@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "retrieval-eval-kit"
+version = "0.1.0"
+description = "Evaluate Databricks AI Search (Vector Search) retrieval configurations with MLflow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mlflow[databricks]>=3.8",
+    "databricks-agents>=1.0",
+    "databricks-ai-search>=0.75",
+    "databricks-sdk>=0.60",
+    "databricks-langchain>=0.20",
+    "langchain-core>=0.3",
+    "langchain-text-splitters>=0.3",
+    "plotly>=5.20",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    # langchain-mcp-adapters (pulled in by databricks-langchain) imports an API removed in mcp 2.0
+    "mcp<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mypy>=1.10", "types-PyYAML"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retrieval_eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+ignore_missing_imports = true   # pyspark is provided by the Databricks runtime; several SDKs ship without stubs

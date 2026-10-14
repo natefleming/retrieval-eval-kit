@@ -1,0 +1,46 @@
+# Three notebook tasks on serverless (environment version 5). Job parameters are passed to every notebook as
+# widgets; empty values fall back to config/experiment.yaml.
+resources:
+  jobs:
+    retrieval_eval:
+      name: retrieval-eval-kit
+      parameters:
+        - {name: config_path, default: "${var.config_path}"}
+        - {name: experiment_name, default: "${var.experiment_name}"}
+        - {name: source_index, default: "${var.source_index}"}
+        - {name: doc_uri_column, default: "${var.doc_uri_column}"}
+        - {name: content_columns, default: "${var.content_columns}"}
+        - {name: output_schema, default: "${var.output_schema}"}
+        - {name: vs_endpoint, default: "${var.vs_endpoint}"}
+        - {name: dataset_table, default: "${var.dataset_table}"}
+        - {name: num_docs, default: "${var.num_docs}"}
+        - {name: num_evals, default: "${var.num_evals}"}
+        - {name: overwrite_dataset, default: "${var.overwrite_dataset}"}
+        - {name: k, default: "${var.k}"}
+        - {name: judge_model, default: "${var.judge_model}"}
+        - {name: use_llm_judges, default: "${var.use_llm_judges}"}
+        - {name: variants, default: "${var.variants}"}
+        - {name: primary_metric, default: "${var.primary_metric}"}
+        - {name: secondary_metric, default: "${var.secondary_metric}"}
+        - {name: latency_budget_ms, default: "${var.latency_budget_ms}"}
+        - {name: baseline_variant, default: "${var.baseline_variant}"}
+      environments:
+        - environment_key: serverless_v5
+          spec:
+            environment_version: "5"
+      tasks:
+        - task_key: generate_dataset
+          environment_key: serverless_v5
+          notebook_task:
+            notebook_path: ../notebooks/01_generate_dataset.py
+        - task_key: build_indexes
+          environment_key: serverless_v5
+          notebook_task:
+            notebook_path: ../notebooks/02_build_indexes.py
+        - task_key: evaluate
+          depends_on:
+            - task_key: generate_dataset
+            - task_key: build_indexes
+          environment_key: serverless_v5
+          notebook_task:
+            notebook_path: ../notebooks/03_evaluate.py

@@ -1,0 +1,46 @@
+# Custom reranker models that notebooks/04_deploy_rerankers.py can deploy on Model Serving.
+#
+# Each key is a model you can select in the notebook's `models` widget (or the deploy_rerankers job's `models`
+# parameter). Every endpoint scales to zero, so it costs nothing while idle; the first request after idle waits for a
+# cold start. Evaluate them with config/rerankers.yaml (factory retrieval_eval.factories:endpoint_reranker).
+#
+# family: qwen3          Qwen3-Reranker (instruction-aware yes/no scoring)
+#         cross_encoder  any sentence-transformers CrossEncoder (bge-reranker, gte-reranker-modernbert, ms-marco, ...)
+# All licenses below are Apache 2.0 (check before adding others: e.g. jina-reranker-v3.5 is CC BY-NC).
+
+models:
+  qwen3_0_6b:
+    description: Qwen3-Reranker-0.6B, good small multilingual reranker
+    hf_repo: Qwen/Qwen3-Reranker-0.6B
+    family: qwen3
+    endpoint_name: retrieval-qwen3-reranker-0-6b
+    model_name: qwen3_reranker_0_6b
+    workload_type: GPU_SMALL
+    batch_size: 32
+
+  qwen3_4b:
+    description: Qwen3-Reranker-4B, highest quality in published benchmarks; slower
+    hf_repo: Qwen/Qwen3-Reranker-4B
+    family: qwen3
+    endpoint_name: retrieval-qwen3-reranker-4b
+    model_name: qwen3_reranker_4b
+    workload_type: GPU_MEDIUM   # 4B parameters in fp16 need the larger GPU
+    batch_size: 16
+
+  gte_modernbert:
+    description: gte-reranker-modernbert-base (149M), fastest modern English reranker
+    hf_repo: Alibaba-NLP/gte-reranker-modernbert-base
+    family: cross_encoder
+    endpoint_name: retrieval-gte-reranker-modernbert
+    model_name: gte_reranker_modernbert_base
+    workload_type: GPU_SMALL
+    batch_size: 64
+
+  bge_v2_m3:
+    description: bge-reranker-v2-m3, established multilingual baseline
+    hf_repo: BAAI/bge-reranker-v2-m3
+    family: cross_encoder
+    endpoint_name: retrieval-bge-reranker-v2-m3
+    model_name: bge_reranker_v2_m3
+    workload_type: GPU_SMALL
+    batch_size: 64

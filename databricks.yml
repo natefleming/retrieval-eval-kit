@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://json.schemastore.org/databricks-asset-bundles.json
+# Retrieval evaluation kit: generate an MLflow eval dataset from an AI Search index, build variant indexes, and
+# evaluate every variant with MLflow.
+#
+# Settings live in config/experiment.yaml. Every variable below overrides one setting; leave it empty ("") to use
+# the file's value. Override at deploy time (--var name=value) or per run (bundle run --params name=value).
+
+bundle:
+  name: retrieval-eval-kit
+  engine: direct
+
+include:
+  - resources/*.yml
+
+variables:
+  config_path:
+    description: Experiment file, relative to notebooks/
+    default: ../config/experiment.yaml
+  source_index:
+    description: Existing AI Search index used as the document source (catalog.schema.index)
+    default: ""
+  doc_uri_column:
+    description: Column in the source table that identifies a document
+    default: ""
+  content_columns:
+    description: Comma-separated columns joined into document text for question generation
+    default: ""
+  output_schema:
+    description: catalog.schema for the dataset, chunk tables and new indexes
+    default: ""
+  vs_endpoint:
+    description: AI Search endpoint for new indexes (empty = the source index's endpoint)
+    default: ""
+  dataset_table:
+    description: MLflow evaluation dataset table name inside output_schema
+    default: ""
+  num_docs:
+    description: Documents sampled for question generation
+    default: ""
+  num_evals:
+    description: Synthetic questions to generate
+    default: ""
+  overwrite_dataset:
+    description: true = delete and regenerate the dataset, false = reuse it if it exists
+    default: ""
+  k:
+    description: Results retrieved per query when a variant does not set num_results
+    default: ""
+  judge_model:
+    description: LLM judge, e.g. databricks:/databricks-claude-sonnet-5-5
+    default: ""
+  use_llm_judges:
+    description: true/false - add RetrievalRelevance and RetrievalSufficiency judges
+    default: ""
+  variants:
+    description: Comma-separated variant names to build/evaluate (empty = all)
+    default: ""
+  primary_metric:
+    description: Metric the recommendation optimizes, e.g. recall_at_10, recall_at_1, ndcg_at_10
+    default: ""
+  secondary_metric:
+    description: Tie-breaker metric between statistically tied variants
+    default: ""
+  latency_budget_ms:
+    description: Exclude variants slower than this mean latency from the recommendation (empty = no budget)
+    default: ""
+  baseline_variant:
+    description: Variant the recommendation is compared against (empty = the first variant)
+    default: ""
+  reranker_models:
+    description: Space-separated keys from config/reranker_models.yaml for the deploy_rerankers job
+    default: qwen3_0_6b
+  experiment_name:
+    description: MLflow experiment path, created by the notebooks if missing (empty = /Users/<you>/retrieval-eval-kit-experiment)
+    default: ""
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      experiment_name: /Shared/retrieval-eval-kit-experiment
